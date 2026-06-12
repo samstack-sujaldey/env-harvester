@@ -10,7 +10,6 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { GoogleGenAI } from "@google/genai";
 
-// Global configuration file path to persist the API key across terminal sessions
 const CONFIG_PATH = path.join(os.homedir(), ".env-harvester-config.json");
 
 /**
@@ -40,10 +39,29 @@ async function saveApiKey(key) {
   }
 }
 
+/**
+ * Helper to parse environment keys from an existing file content string
+ */
+function parseExistingKeys(content) {
+  const keys = new Set();
+  const lines = content.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Skip comments and empty lines
+    if (trimmed && !trimmed.startsWith("#")) {
+      const match = trimmed.match(/^([^=:\s]+)\s*=/);
+      if (match) {
+        keys.add(match[1].trim());
+      }
+    }
+  }
+  return keys;
+}
+
 program
   .name("env-harvester")
-  .description("Auto-generates .env and .env.example by scanning your codebase")
-  .version("1.0.0")
+  .description("Auto-generates and incrementally updates .env and .env.example files")
+  .version("1.1.0")
   .action(async () => {
     const rl = readline.createInterface({ input, output });
 
@@ -59,11 +77,11 @@ program
         console.log("\x1b[36m=== .Env Generator AI CLI ===\x1b[0m\n");
 
         if (!apiKey) {
-          console.log("1. Generate .env files (Simple / No AI)");
+          console.log("1. Generate / Update .env files (Simple / No AI)");
           console.log("2. Set Gemini API Key");
           console.log("3. Exit\n");
         } else {
-          console.log("1. Generate .env files (Smart AI Powered)");
+          console.log("1. Generate / Update .env files (Smart AI Powered)");
           console.log("2. Change Gemini API Key");
           console.log("3. View current Gemini API Key");
           console.log("4. Exit\n");
@@ -72,14 +90,12 @@ program
         const maxOptions = apiKey ? "4" : "3";
         choice = (await rl.question(`Select an option (1-${maxOptions}): `)).trim();
 
-        // Handle Exit Action
         if ((!apiKey && choice === "3") || (apiKey && choice === "4")) {
           console.log("Goodbye!");
           rl.close();
           process.exit(0);
         }
 
-        // Handle Set/Change Key Action
         if (choice === "2") {
           const newKey = await rl.question(
             apiKey ? "Enter New Gemini API Key: " : "Enter Gemini API Key: "
@@ -90,60 +106,53 @@ program
             console.log("\x1b[32mAPI Key saved successfully!\x1b[0m");
             await rl.question("\nPress Enter to return to menu...");
           }
-          continue; // Refresh menu layout
+          continue;
         }
 
-        // Handle View Key Action
         if (apiKey && choice === "3") {
           const keyLength = apiKey.length;
-          // Create a masked version (e.g., AIzaS*******************ABC)
           const maskedKey = keyLength > 10 
             ? apiKey.slice(0, 5) + "*".repeat(keyLength - 10) + apiKey.slice(-5)
             : apiKey;
 
           console.log(`\n\x1b[33m--- Your Saved API Key ---\x1b[0m`);
           console.log(`Masked: \x1b[36m${maskedKey}\x1b[0m`);
+          console.log(`Full:   \x1b[32m${apiKey}\x1b[0m`);
           console.log(`\x1b[33m--------------------------\x1b[0m`);
           
           await rl.question("\nPress Enter to return to menu...");
           continue;
         }
 
-        // Handle Generate Action
         if (choice === "1") {
-          break; // Break loop to proceed with generation engine below
+          break;
         }
 
-        // Handle Invalid Inputs
         console.log(`\x1b[31mInvalid option. Please choose a number between 1 and ${maxOptions}.\x1b[0m`);
         await rl.question("\nPress Enter to try again...");
       }
 
-      rl.close(); // Close interface before spinner outputs start
+      rl.close();
 
       // ---------------------------------------------------------
       // CORE ENGINE EXECUTION
       // ---------------------------------------------------------
       const spinner = ora("Checking project environment...").start();
 
-      let envExists = false;
-      let envExampleExists = false;
+      let existingEnvContent = "";
+      let existingExampleContent = "";
+      let envKeys = new Set();
+      let exampleKeys = new Set();
 
       try {
-        await fs.access(".env");
-        envExists = true;
+        existingEnvContent = await fs.readFile(".env", "utf-8");
+        envKeys = parseExistingKeys(existingEnvContent);
       } catch (e) {}
 
       try {
-        await fs.access(".env.example");
-        envExampleExists = true;
+        existingExampleContent = await fs.readFile(".env.example", "utf-8");
+        exampleKeys = parseExistingKeys(existingExampleContent);
       } catch (e) {}
-
-      // Rule 1: If both exist, do nothing and exit immediately
-      if (envExists && envExampleExists) {
-        spinner.succeed("Both .env and .env.example are already present. No changes made.");
-        process.exit(0);
-      }
 
       // STEP A: Crawl Files
       spinner.text = "Crawling project directory...";
@@ -177,19 +186,36 @@ program
       }
 
       if (envTracker.size === 0) {
-        spinner.succeed("No environment variables found. You are all set!");
+        spinner.succeed("No environment variables found in the codebase.");
         process.exit(0);
       }
 
-      // STEP C: Process Contextual Data (AI vs Hardcoded Fallback)
+      // Identify exactly what is missing globally
+      const missingInEnv = [];
+      const missingInExample = [];
+
+      for (const key of envTracker.keys()) {
+        if (!envKeys.has(key)) missingInEnv.push(key);
+        if (!exampleKeys.has(key)) missingInExample.push(key);
+      }
+
+      // Gather a unique set of all keys requiring value/instruction synthesis
+      const totalKeysToProcess = Array.from(new Set([...missingInEnv, ...missingInExample]));
+
+      if (totalKeysToProcess.length === 0) {
+        spinner.succeed("Both .env and .env.example are completely up to date with your codebase!");
+        process.exit(0);
+      }
+
+      // STEP C: Process Contextual Data (AI vs Hardcoded Fallback) Only for Missing Keys
       let aiFallbacks = {};
 
       if (apiKey) {
-        spinner.text = "Consulting AI to infer context and click-by-click steps...";
-        const keysToAnalyze = Array.from(envTracker.keys()).join(", ");
+        spinner.text = `Consulting AI to analyze ${totalKeysToProcess.length} newly discovered keys...`;
+        const keysToAnalyze = totalKeysToProcess.join(", ");
 
         const prompt = `
-          You are an expert developer onboarding assistant. I am giving you a list of environment variable keys found in a project codebase: [${keysToAnalyze}].
+          You are an expert developer onboarding assistant. I am giving you a list of environment variable keys newly added to a codebase: [${keysToAnalyze}].
           
           For each key, provide two fields in your JSON response:
           1. "value": A realistic, non-secret placeholder value or standard default fallback.
@@ -199,7 +225,7 @@ program
           - Provide the exact website dashboard URL to open.
           - Give a literal, directional step path (e.g., "Go to Dashboard > Settings > API Keys").
           - Explain the final action needed to copy the string.
-          - Do NOT write generic text like "Configure your database connection" or "Register your app details".
+          - Do NOT write generic text like "Configure your database connection".
           
           Return ONLY a clean, valid JSON object matching the exact format layout below:
           {
@@ -216,62 +242,77 @@ program
           });
           aiFallbacks = JSON.parse(response.text || "{}");
         } catch (aiError) {
-          console.error("\n--- DEBUG AI ERROR ---", aiError);
-          spinner.warn("AI generation failed. Using generic fallbacks instead.");
+          spinner.warn("AI generation failed. Falling back to simple default placeholders.");
         }
       } else {
-        spinner.info("No Gemini API key configured. Generating files with standard fallbacks.");
-        spinner.start("Building environment configuration files...");
+        spinner.info("No Gemini key configured. Running structural incremental additions.");
+        spinner.start("Syncing configuration entries...");
       }
 
-      // STEP D: Build File Content String
-      let envContent = "# ------------------------------------------------------\n";
-      envContent += `# Auto-generated environment variables by env-harvester\n`;
-      envContent += "# ------------------------------------------------------\n\n";
-
-      for (const [key, fileSet] of envTracker.entries()) {
-        const aiResponse = aiFallbacks[key];
-        let finalValue = "your_value_here";
-        let instructions = "Check provider documentation to generate this configuration value.";
-
-        // Handle structural input differences gracefully
-        if (aiResponse && typeof aiResponse === "object") {
-          finalValue = aiResponse.value || finalValue;
-          instructions = aiResponse.instructions || instructions;
-        } else if (typeof aiResponse === "string") {
-          finalValue = aiResponse;
+      // Helper function to build content blocks cleanly
+      const buildAppendString = (missingKeys, isNewFile) => {
+        let block = "";
+        if (isNewFile) {
+          block += "# ------------------------------------------------------\n";
+          block += `# Auto-generated environment variables by env-harvester\n`;
+          block += "# ------------------------------------------------------\n\n";
+        } else {
+          block += "\n# ------------------------------------------------------\n";
+          block += `# Incremental Updates Discovered On: ${new Date().toLocaleDateString()}\n`;
+          block += "# ------------------------------------------------------\n\n";
         }
 
-        const filesUsedIn = Array.from(fileSet);
-        envContent += `# Used in: ${filesUsedIn.join(", ")}\n`;
-        envContent += `# How to get: ${instructions}\n`;
-        envContent += `${key}=${finalValue}\n\n`;
+        for (const key of missingKeys) {
+          const aiResponse = aiFallbacks[key];
+          let finalValue = "your_value_here";
+          let instructions = "Check provider documentation to generate this configuration value.";
+
+          if (aiResponse && typeof aiResponse === "object") {
+            finalValue = aiResponse.value || finalValue;
+            instructions = aiResponse.instructions || instructions;
+          }
+
+          const fileSet = envTracker.get(key);
+          const filesUsedIn = fileSet ? Array.from(fileSet) : [];
+          block += `# Used in: ${filesUsedIn.join(", ")}\n`;
+          block += `# How to get: ${instructions}\n`;
+          block += `${key}=${finalValue}\n\n`;
+        }
+        return block;
+      };
+
+      // STEP D: Write or Append Incremental Blocks Uniquely per File Type
+      spinner.text = "Applying updates to environment configuration files...";
+
+      // Handle .env processing
+      if (missingInEnv.length > 0) {
+        const isNew = existingEnvContent.trim().length === 0;
+        const appendData = buildAppendString(missingInEnv, isNew);
+        // Ensure append formatting doesn't glue into text on lines missing terminal breaks
+        const baseString = existingEnvContent.length > 0 && !existingEnvContent.endsWith("\n") 
+          ? existingEnvContent + "\n" 
+          : existingEnvContent;
+        
+        await fs.writeFile(".env", baseString + appendData, "utf-8");
       }
 
-      // STEP E: Write Files Safely According to Directory State Edge Cases
-      spinner.text = "Writing configuration files...";
+      // Handle .env.example processing
+      if (missingInExample.length > 0) {
+        const isNew = existingExampleContent.trim().length === 0;
+        const appendData = buildAppendString(missingInExample, isNew);
+        const baseString = existingExampleContent.length > 0 && !existingExampleContent.endsWith("\n") 
+          ? existingExampleContent + "\n" 
+          : existingExampleContent;
 
-      if (envExists && !envExampleExists) {
-        await fs.writeFile(".env.example", envContent, "utf-8");
-        spinner.succeed(
-          `Success! Harvested ${envTracker.size} variables. Created .env.example (Your existing .env was kept safe).`
-        );
-      } else if (!envExists && !envExampleExists) {
-        await fs.writeFile(".env.example", envContent, "utf-8");
-        await fs.writeFile(".env", envContent, "utf-8");
-        spinner.succeed(
-          `Success! Harvested ${envTracker.size} variables. Created both .env and .env.example.`
-        );
-      } else if (!envExists && envExampleExists) {
-        await fs.writeFile(".env", envContent, "utf-8");
-        spinner.succeed(
-          `Success! Harvested ${envTracker.size} variables. Created fresh .env file.`
-        );
+        await fs.writeFile(".env.example", baseString + appendData, "utf-8");
       }
 
+      spinner.succeed(
+        `Synchronization Complete! Added ${missingInEnv.length} new key(s) to .env and ${missingInExample.length} new key(s) to .env.example.`
+      );
       process.exit(0);
     } catch (error) {
-      spinner.fail("An unexpected system error occurred during processing.");
+      spinner.fail("An unexpected system error occurred during configuration merge.");
       console.error(error);
       process.exit(1);
     }
