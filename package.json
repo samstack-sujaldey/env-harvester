@@ -1,11 +1,10 @@
 {
-  "name": "env-generator",
-  "version": "1.0.1",
+  "name": "env-harvester",
+  "version": "1.0.2",
   "description": "",
   "main": "index.js",
   "bin": {
-    "env-harvester": "./index.js",
-    "env-generator": "./index.js"
+    "env-harvester": "./index.js"
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
