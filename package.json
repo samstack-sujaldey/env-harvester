@@ -1,0 +1,22 @@
+{
+  "name": "env-harvester",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "bin": {
+    "env-harvester": "./index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@google/genai": "^2.8.0",
+    "commander": "^15.0.0",
+    "fast-glob": "^3.3.3",
+    "ora": "^9.4.0"
+  }
+}
